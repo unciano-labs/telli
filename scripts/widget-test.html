@@ -1,0 +1,42 @@
+<!doctype html>
+<!--
+  Cross-site widget test. Serve this folder from a different port than the app, e.g.
+    npx serve scripts -l 5500
+  then open http://localhost:5500/widget-test.html?key=wk_...&app=http://localhost:3000
+  Add http://localhost:5500 to the widget's allowed websites, or the browser blocks the iframe.
+-->
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Widget test site</title>
+    <style>
+      body { font: 16px/1.5 system-ui, sans-serif; margin: 0; padding: 48px 16px; background: #0f172a; color: #e2e8f0; }
+      main { max-width: 640px; margin: 0 auto; }
+      code { background: #1e293b; padding: 2px 6px; border-radius: 4px; }
+    </style>
+  </head>
+  <body>
+    <main>
+      <h1>Acme Dental (test site)</h1>
+      <p>This page stands in for a customer website on another origin. The widget should appear in the corner.</p>
+      <p id="status"></p>
+    </main>
+    <script>
+      const params = new URLSearchParams(location.search);
+      const key = params.get('key');
+      const app = params.get('app') || 'http://localhost:3000';
+      const status = document.getElementById('status');
+      if (!key) {
+        status.innerHTML = 'Add <code>?key=wk_...</code> to the URL (copy it from Admin → Widgets).';
+      } else {
+        status.innerHTML = 'Loading widget <code>' + key + '</code> from <code>' + app + '</code>';
+        const s = document.createElement('script');
+        s.src = app + '/widget.js';
+        s.dataset.key = key;
+        s.async = true;
+        document.body.appendChild(s);
+      }
+    </script>
+  </body>
+</html>
