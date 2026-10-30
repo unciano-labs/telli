@@ -13,7 +13,16 @@ export const AGENT_TOOLS_PATH = '/api/agent-tools';
 
 const MODULE_TOOL_NAMES: Record<ModuleId, string[]> = {
   reservations: ['get_services', 'check_availability', 'book_appointment'],
-  rentals: ['get_apartments', 'get_apartment_details', 'check_stay_availability', 'book_stay', 'get_guest_access'],
+  rentals: [
+    'get_apartments',
+    'get_apartment_details',
+    'check_stay_availability',
+    'book_stay',
+    'get_guest_access',
+    'find_booking',
+    'change_stay',
+    'cancel_stay',
+  ],
 };
 /** Tools this app manages on a workspace LLM (replaced on every draft save). */
 export const MANAGED_TOOL_NAMES = new Set(['end_call', ...Object.values(MODULE_TOOL_NAMES).flat()]);
@@ -117,10 +126,41 @@ export function moduleTools(modules: ModuleState[]) {
           ['apartment', 'check_in', 'check_out', 'guests', 'customer_name', 'customer_phone']
         ),
         tool(
+          'find_booking',
+          'Look up a guest’s stay before changing or cancelling it: dates, apartment, total, what can still be changed, and what cancelling would cost under the policy. Needs the booking reference and the mobile number on the booking.',
+          {
+            booking_reference: string('The 6-digit booking reference'),
+            phone: string('The mobile number used for the booking'),
+          },
+          ['booking_reference', 'phone']
+        ),
+        tool(
+          'change_stay',
+          'Change a verified stay after the guest agreed to the new details and total: extend or move the dates, switch apartment, or change the number of guests. Leave out what stays the same.',
+          {
+            booking_reference: string('The 6-digit booking reference'),
+            phone: string('The mobile number used for the booking'),
+            check_in: string('New check-in date, YYYY-MM-DD (leave out to keep it)'),
+            check_out: string('New check-out date, YYYY-MM-DD (leave out to keep it)'),
+            apartment: string('New apartment name or code (leave out to keep it)'),
+            guests: { type: 'integer', description: 'New number of guests (leave out to keep it)' },
+          },
+          ['booking_reference', 'phone']
+        ),
+        tool(
+          'cancel_stay',
+          'Cancel a verified stay after the guest heard what it costs under the cancellation policy (from find_booking) and clearly said yes.',
+          {
+            booking_reference: string('The 6-digit booking reference'),
+            phone: string('The mobile number used for the booking'),
+          },
+          ['booking_reference', 'phone']
+        ),
+        tool(
           'get_guest_access',
           'Key safe code, Wi-Fi and door codes for a guest with a confirmed stay. Needs the booking reference and the mobile number on the booking; it checks both.',
           {
-            booking_reference: string('The 8-character booking reference the guest was given'),
+            booking_reference: string('The 6-digit booking reference the guest was given'),
             phone: string('The mobile number used for the booking'),
           },
           ['booking_reference', 'phone']
@@ -142,10 +182,11 @@ export function modulesPrompt(modules: ModuleState[]): string {
     '- Never say something is available, or quote a total, without checking with a function first. Don’t invent services, apartments, prices or times.',
     '- Offer at most three options at a time.',
     '- Before booking, read back the details (what, when, name, mobile number) and wait for a clear yes.',
-    '- After booking, confirm it in one sentence and read the booking reference slowly. If a function says something is no longer free, offer the alternatives it gives.',
+    '- After booking, confirm it in one sentence and read the 6-digit booking reference slowly, digit by digit. If a function says something is no longer free, offer the alternatives it gives.',
   ];
   if (modules.some((m) => m.module === 'rentals')) {
     lines.push(
+      '- To change or cancel a stay: get the booking reference and mobile number, call find_booking, explain what is possible and what it costs (new total, or the cancellation fee), wait for a clear yes, then call change_stay or cancel_stay. Never promise refunds or exceptions beyond what the functions say.',
       '- Key safe codes, Wi-Fi passwords, door and gate codes are secret. Only share them when get_guest_access returns them during this call, never from memory, and never to someone who can’t give the booking reference and mobile number. You never know staff codes.'
     );
   }

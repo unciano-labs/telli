@@ -91,11 +91,16 @@ export function Agenda({
                         </>
                       )}
                       {b.total_cents ? ` · ${formatPrice(b.total_cents, currencies[b.kind])}` : ''}
-                      {` · ref ${b.id.slice(0, 8).toUpperCase()}`}
+                      {` · ref ${b.reference}`}
                       {` · ${b.source === 'call' ? 'booked by the agent' : 'added by the team'}`}
                       {cancelled && ' · cancelled'}
                     </p>
                     {b.notes && <p className="text-xs text-slate-500">Note: {b.notes}</p>}
+                    {b.history?.length > 0 && (
+                      <p className="text-xs text-amber-700">
+                        {b.history.at(-1)!.summary} · {new Date(b.history.at(-1)!.at).toLocaleDateString(undefined, { month: 'short', day: 'numeric' })}
+                      </p>
+                    )}
                   </div>
                   {canEdit && !cancelled && (
                     <button onClick={() => onCancel(b)} className="inline-flex items-center gap-1 rounded px-1.5 py-1 text-xs text-slate-500 hover:text-red-600">

@@ -35,6 +35,14 @@ export type RentalSettings = {
   currency: string;
   check_in_time: string;
   check_out_time: string;
+  /** Free cancellation until this many days before check-in. */
+  cancel_free_days: number;
+  /** After that, this share of the total is charged (100 = non-refundable). */
+  cancel_fee_percent: number;
+  /** Date, apartment and guest changes allowed until this many hours before check-in. */
+  change_cutoff_hours: number;
+  /** Anything else callers should hear about the policy. */
+  policy_notes: string;
 };
 
 export type ModuleSettings = { reservations: ReservationSettings; rentals: RentalSettings };
@@ -68,7 +76,16 @@ export function defaultSettings<M extends ModuleId>(module: M, timezone = DEFAUL
       capacity: 1,
       hours: { ...weekdays([{ start: '09:00', end: '18:00' }]), sat: [{ start: '09:00', end: '13:00' }], sun: [] },
     },
-    rentals: { timezone, currency: 'USD', check_in_time: '14:00', check_out_time: '11:00' },
+    rentals: {
+      timezone,
+      currency: 'USD',
+      check_in_time: '14:00',
+      check_out_time: '11:00',
+      cancel_free_days: 7,
+      cancel_fee_percent: 50,
+      change_cutoff_hours: 24,
+      policy_notes: '',
+    },
   };
   return settings[module];
 }

@@ -64,6 +64,38 @@ export function RentalSettingsForm({
           <input type="time" className={inputCls} disabled={!canEdit} value={draft.check_out_time} onChange={set('check_out_time')} />
         </label>
       </div>
+      <fieldset className="grid gap-3 sm:grid-cols-3">
+        <legend className="mb-1 text-sm font-semibold text-slate-700">Changes and cancellations by phone</legend>
+        <label className="block text-sm font-medium text-slate-700">
+          Free cancellation until
+          <span className="mt-1 flex items-center gap-2">
+            <input type="number" min={0} max={365} className={`${inputCls} mt-0`} disabled={!canEdit} value={draft.cancel_free_days} onChange={(e) => setDraft((d) => ({ ...d, cancel_free_days: Number(e.target.value) }))} />
+            <span className="shrink-0 text-xs font-normal text-slate-500">days before check-in</span>
+          </span>
+        </label>
+        <label className="block text-sm font-medium text-slate-700">
+          After that, the fee is
+          <span className="mt-1 flex items-center gap-2">
+            <input type="number" min={0} max={100} className={`${inputCls} mt-0`} disabled={!canEdit} value={draft.cancel_fee_percent} onChange={(e) => setDraft((d) => ({ ...d, cancel_fee_percent: Number(e.target.value) }))} />
+            <span className="shrink-0 text-xs font-normal text-slate-500">% of the total</span>
+          </span>
+        </label>
+        <label className="block text-sm font-medium text-slate-700">
+          Date or apartment changes until
+          <span className="mt-1 flex items-center gap-2">
+            <input type="number" min={0} max={720} className={`${inputCls} mt-0`} disabled={!canEdit} value={draft.change_cutoff_hours} onChange={(e) => setDraft((d) => ({ ...d, change_cutoff_hours: Number(e.target.value) }))} />
+            <span className="shrink-0 text-xs font-normal text-slate-500">hours before check-in</span>
+          </span>
+        </label>
+        <label className="block text-sm font-medium text-slate-700 sm:col-span-3">
+          Policy notes <span className="font-normal text-slate-400">optional, read to callers</span>
+          <input className={inputCls} maxLength={1000} disabled={!canEdit} value={draft.policy_notes} onChange={set('policy_notes')} placeholder="Refunds go back through the booking platform within 5–10 days." />
+        </label>
+        <p className="text-xs text-slate-500 sm:col-span-3">
+          Callers prove a booking with its reference and mobile number. Extending check-out is always allowed if the apartment is free; a stay
+          that has started can’t be shortened or cancelled by phone. 100% means non-refundable.
+        </p>
+      </fieldset>
       <ErrorText error={error} />
       {canEdit && (
         <div className="flex items-center gap-3">

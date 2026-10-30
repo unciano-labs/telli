@@ -76,6 +76,8 @@ export type RentalPrivate = { guest_info: string | null; internal_notes: string 
 
 export type Booking = {
   id: string;
+  /** 6 digits, unique in the workspace: what callers say to find their booking. */
+  reference: string;
   kind: 'appointment' | 'stay';
   service_id: string | null;
   rental_id: string | null;
@@ -90,8 +92,13 @@ export type Booking = {
   total_cents: number | null;
   status: 'confirmed' | 'cancelled';
   source: 'call' | 'manual';
+  /** Set when a cancellation fell outside free cancellation. */
+  cancellation_fee_cents: number | null;
+  history: BookingEvent[];
   created_at: string;
 };
+
+export type BookingEvent = { at: string; by: 'call' | 'manual'; action: 'changed' | 'cancelled'; summary: string };
 
 const MAX_ITEMS = 50;
 const MAX_STAY_NIGHTS = 30;
@@ -124,7 +131,22 @@ function validateSettings(module: ModuleId, raw: Record<string, unknown>, curren
     const checkIn = (raw.check_in_time ?? cur.check_in_time) as string;
     const checkOut = (raw.check_out_time ?? cur.check_out_time) as string;
     if (!HHMM.test(checkIn) || !HHMM.test(checkOut)) throw new BookingError('Check-in and check-out times are HH:MM', 400);
-    return { timezone, currency, check_in_time: checkIn, check_out_time: checkOut } satisfies RentalSettings;
+    const int = (key: keyof RentalSettings, min: number, max: number, label: string) => {
+      const n = Number(raw[key] ?? cur[key]);
+      if (!Number.isInteger(n) || n < min || n > max) throw new BookingError(`${label}: ${min}–${max}`, 400);
+      return n;
+    };
+    const notes = text(raw.policy_notes ?? cur.policy_notes ?? '', 1000);
+    return {
+      timezone,
+      currency,
+      check_in_time: checkIn,
+      check_out_time: checkOut,
+      cancel_free_days: int('cancel_free_days', 0, 365, 'Free cancellation days'),
+      cancel_fee_percent: int('cancel_fee_percent', 0, 100, 'Late cancellation fee (%)'),
+      change_cutoff_hours: int('change_cutoff_hours', 0, 720, 'Hours before check-in for changes'),
+      policy_notes: notes,
+    } satisfies RentalSettings;
   }
 
   const cur = current as ReservationSettings;
@@ -351,7 +373,7 @@ export async function deleteItem(workspace: Workspace, table: Table, id: string)
 // Bookings
 
 const BOOKING_COLUMNS =
-  'id, kind, service_id, rental_id, starts_at, ends_at, customer_name, customer_phone, guests, notes, total_cents, status, source, created_at, va_services(name), va_rentals(name)';
+  'id, reference, kind, service_id, rental_id, starts_at, ends_at, customer_name, customer_phone, guests, notes, total_cents, status, source, cancellation_fee_cents, history, created_at, va_services(name), va_rentals(name)';
 
 type BookingRow = Omit<Booking, 'item_name'> & { va_services: { name: string } | null; va_rentals: { name: string } | null };
 
@@ -380,9 +402,16 @@ export async function listDashboardBookings(workspaceId: string): Promise<Bookin
 }
 
 export async function cancelBooking(workspace: Workspace, id: string): Promise<void> {
+  const existing = await findBooking(workspace.id, id);
+  const now = new Date().toISOString();
   const { data, error } = await db()
     .from('va_bookings')
-    .update({ status: 'cancelled', updated_at: new Date().toISOString() })
+    .update({
+      status: 'cancelled',
+      cancelled_at: now,
+      updated_at: now,
+      history: [...(existing?.history ?? []), { at: now, by: 'manual', action: 'cancelled', summary: 'Cancelled by the team' }],
+    })
     .eq('website_id', WEBSITE_ID)
     .eq('workspace_id', workspace.id)
     .eq('id', id)
@@ -608,38 +637,225 @@ const ACCESS_EARLY_MS = 24 * 60 * 60 * 1000;
  * until check-out (the same rule as sending the code in the chat a day before arrival).
  * A few tries per call, so a caller can't guess references.
  */
-async function guestAccess(workspace: Workspace, args: Record<string, unknown>, callId: string | null): Promise<string> {
-  if (!rateLimit(`guest-access:${workspace.id}:${callId ?? 'none'}`, ACCESS_ATTEMPTS, ACCESS_WINDOW_MS).allowed) {
-    return 'Too many tries on this call. Do not share any codes. Tell the caller to message the host through the booking app.';
+type VerifiedStay = Pick<Booking, 'id' | 'reference' | 'rental_id' | 'customer_phone' | 'starts_at' | 'ends_at' | 'guests' | 'total_cents' | 'history'>;
+
+/**
+ * Finds the caller's confirmed, not yet finished stay from the booking reference (the first 8
+ * characters of its id) and the mobile number on it. Returns a message instead when it can't.
+ * `bucket` limits tries per call, so references can't be guessed.
+ */
+async function verifyStay(
+  workspace: Workspace,
+  args: Record<string, unknown>,
+  callId: string | null,
+  bucket: string,
+  tries: number
+): Promise<VerifiedStay | string> {
+  if (!rateLimit(`${bucket}:${workspace.id}:${callId ?? 'none'}`, tries, ACCESS_WINDOW_MS).allowed) {
+    return 'Too many tries on this call. Do not share codes or change anything. Tell the caller to message the host through the booking app.';
   }
-  const reference = text(args.booking_reference, 20).toLowerCase().replace(/[^0-9a-f]/g, '');
+  // Callers say it with spaces or dashes ("482 913"); only the digits count
+  const reference = text(args.booking_reference, 20).replace(/\D/g, '');
   const phoneDigits = text(args.phone, 40).replace(/\D/g, '');
-  if (reference.length < 8 || phoneDigits.length < 7) {
-    return 'Ask for the 8-character booking reference and the mobile number used for the booking. Do not share any codes without them.';
+  if (reference.length !== 6 || phoneDigits.length < 7) {
+    return 'Ask for the 6-digit booking reference and the mobile number used for the booking.';
   }
   const { data, error } = await db()
     .from('va_bookings')
-    .select('id, rental_id, customer_phone, starts_at, ends_at')
+    .select('id, reference, rental_id, customer_phone, starts_at, ends_at, guests, total_cents, history')
     .eq('website_id', WEBSITE_ID)
     .eq('workspace_id', workspace.id)
+    .eq('reference', reference)
     .eq('kind', 'stay')
     .eq('status', 'confirmed')
-    .gte('ends_at', new Date().toISOString())
-    .limit(500);
+    .gte('ends_at', new Date().toISOString());
   if (error) throw new Error(`Failed to load bookings: ${error.message}`);
   const lastDigits = (v: string | null) => (v ?? '').replace(/\D/g, '').slice(-7);
-  const booking = (data ?? []).find(
-    (b) => b.id.replace(/-/g, '').startsWith(reference.slice(0, 8)) && lastDigits(b.customer_phone) === phoneDigits.slice(-7)
-  );
-  if (!booking) {
-    return 'No confirmed upcoming stay matches that reference and mobile number. Do not share any codes. Offer to have the host contact them.';
-  }
+  const booking = (data as VerifiedStay[] | null)?.find((b) => lastDigits(b.customer_phone) === phoneDigits.slice(-7));
+  return booking ?? 'No confirmed upcoming stay matches that reference and mobile number. Offer to have the host contact them.';
+}
+
+/**
+ * Gives a caller their apartment's guest-only details, but only for a verified stay and from 24
+ * hours before check-in (the same rule as sending the code in the chat a day before arrival).
+ */
+async function guestAccess(workspace: Workspace, args: Record<string, unknown>, callId: string | null): Promise<string> {
+  const booking = await verifyStay(workspace, args, callId, 'guest-access', ACCESS_ATTEMPTS);
+  if (typeof booking === 'string') return `${booking} Do not share any codes.`;
   if (Date.now() < Date.parse(booking.starts_at) - ACCESS_EARLY_MS) {
     return 'The booking is confirmed, but access details are only shared from 24 hours before check-in. Tell the guest they will get them then.';
   }
-  const { guest_info } = await getRentalPrivate(workspace, booking.rental_id);
+  const { guest_info } = await getRentalPrivate(workspace, booking.rental_id!);
   if (!guest_info) return 'The booking is confirmed, but no access details are on file. Tell the guest the host will send them in the chat.';
   return `Verified guest. Share these access details with this caller only, slowly and clearly:\n${guest_info}`;
+}
+
+// ---------------------------------------------------------------------------
+// Changes and cancellations by the guest, following the workspace's policy
+
+const CHANGE_ATTEMPTS = 5;
+
+function localDate(iso: string, timezone: string) {
+  return localParts(new Date(iso), timezone).date;
+}
+
+function daysBetween(from: string, to: string) {
+  return Math.round((Date.parse(`${to}T12:00:00Z`) - Date.parse(`${from}T12:00:00Z`)) / 86_400_000);
+}
+
+/** What cancelling now would cost under the policy, or why it can't be done by phone. */
+function cancellationTerms(stay: VerifiedStay, settings: RentalSettings) {
+  if (Date.now() >= Date.parse(stay.starts_at)) return { allowed: false as const };
+  const checkIn = localDate(stay.starts_at, settings.timezone);
+  const freeUntil = addDays(checkIn, -settings.cancel_free_days);
+  const free = daysBetween(todayIn(settings.timezone), checkIn) >= settings.cancel_free_days;
+  const fee = free ? 0 : Math.round(((stay.total_cents ?? 0) * settings.cancel_fee_percent) / 100);
+  return { allowed: true as const, free, fee, freeUntil };
+}
+
+function changeDeadline(stay: VerifiedStay, settings: RentalSettings) {
+  return Date.parse(stay.starts_at) - settings.change_cutoff_hours * 3_600_000;
+}
+
+function money(cents: number, settings: RentalSettings) {
+  return formatPrice(cents, settings.currency);
+}
+
+async function rentalSettings(workspace: Workspace) {
+  const mod = await getModule(workspace.id, 'rentals');
+  return mod?.enabled ? (mod.settings as RentalSettings) : null;
+}
+
+/** Reads back a verified stay with what the guest may change or cancel, and at what cost. */
+async function describeStay(workspace: Workspace, args: Record<string, unknown>, callId: string | null) {
+  const settings = await rentalSettings(workspace);
+  if (!settings) return 'Rentals are turned off.';
+  const stay = await verifyStay(workspace, args, callId, 'stay-verify', CHANGE_ATTEMPTS);
+  if (typeof stay === 'string') return stay;
+  const rental = (await listRentals(workspace.id)).find((r) => r.id === stay.rental_id);
+  const checkIn = localDate(stay.starts_at, settings.timezone);
+  const checkOut = localDate(stay.ends_at, settings.timezone);
+  const nights = daysBetween(checkIn, checkOut);
+  const started = Date.now() >= Date.parse(stay.starts_at);
+  const terms = cancellationTerms(stay, settings);
+  const deadline = changeDeadline(stay, settings);
+  const lines = [
+    `Verified stay: ${rental?.name ?? 'apartment'}${rental?.code ? ` (${rental.code})` : ''}, ${stay.guests ?? '?'} guests, check-in ${describeDate(checkIn, settings.timezone)} (${checkIn}), check-out ${describeDate(checkOut, settings.timezone)} (${checkOut}), ${nights} nights, total ${money(stay.total_cents ?? 0, settings)}.`,
+    started
+      ? 'The stay has started: it can be extended (later check-out) if the apartment is free; for anything else, offer to have the host call back.'
+      : Date.now() < deadline
+        ? `Dates, apartment and number of guests can be changed until ${new Date(deadline).toLocaleString('en-US', { timeZone: settings.timezone, dateStyle: 'medium', timeStyle: 'short' })}, if available. Extending is possible any time if the apartment is free.`
+        : `Changes to dates, apartment or guests are no longer possible (less than ${settings.change_cutoff_hours} hours before check-in). Extending check-out is still possible if the apartment is free.`,
+    !terms.allowed
+      ? 'Cancelling is not possible once the stay has started.'
+      : terms.free
+        ? `Cancelling now is free (free cancellation until ${describeDate(terms.freeUntil, settings.timezone)}).`
+        : `Cancelling now costs ${money(terms.fee, settings)} (${settings.cancel_fee_percent}% of the total); free cancellation ended ${describeDate(terms.freeUntil, settings.timezone)}.`,
+    settings.policy_notes && `Policy notes: ${settings.policy_notes}`,
+  ];
+  return lines.filter(Boolean).join('\n');
+}
+
+async function changeStay(workspace: Workspace, args: Record<string, unknown>, callId: string | null) {
+  const settings = await rentalSettings(workspace);
+  if (!settings) return 'Rentals are turned off.';
+  const stay = await verifyStay(workspace, args, callId, 'stay-verify', CHANGE_ATTEMPTS);
+  if (typeof stay === 'string') return stay;
+  const rentals = await listRentals(workspace.id);
+  const current = rentals.find((r) => r.id === stay.rental_id)!;
+  const oldIn = localDate(stay.starts_at, settings.timezone);
+  const oldOut = localDate(stay.ends_at, settings.timezone);
+  const newIn = text(args.check_in, 10) || oldIn;
+  const newOut = text(args.check_out, 10) || oldOut;
+  const target = args.apartment ? findByName(rentals.filter((r) => r.active), text(args.apartment, 120)) : current;
+  if (!target) return `There's no apartment called "${text(args.apartment, 120)}". Call get_apartments for the list.`;
+  const guests = args.guests === undefined || args.guests === null || args.guests === '' ? (stay.guests ?? 1) : guestsOf(args.guests);
+  if (newIn === oldIn && newOut === oldOut && target.id === current.id && guests === stay.guests) return 'Nothing to change.';
+
+  const extension = target.id === current.id && newIn === oldIn && newOut > oldOut && guests === stay.guests;
+  const started = Date.now() >= Date.parse(stay.starts_at);
+  if (started && !extension) return 'The stay has started, so only extending check-out can be done by phone. Offer to have the host call back.';
+  if (!started && !extension && Date.now() >= changeDeadline(stay, settings)) {
+    return `Changes are only possible until ${settings.change_cutoff_hours} hours before check-in. Only extending check-out is still possible. Offer to have the host call back.`;
+  }
+  if (newIn !== oldIn) assertDate(newIn, 'Check-in', settings.timezone);
+  assertDate(newOut, 'Check-out', settings.timezone);
+  const nights = daysBetween(newIn, newOut);
+  if (nights < 1 || nights > MAX_STAY_NIGHTS) return `Stays are 1–${MAX_STAY_NIGHTS} nights.`;
+  if (guests > target.max_guests) return `${target.name} fits up to ${target.max_guests} guests.`;
+
+  const startsAt = zonedToUtc(newIn, settings.check_in_time, settings.timezone).toISOString();
+  const endsAt = zonedToUtc(newOut, settings.check_out_time, settings.timezone).toISOString();
+  const { data: clash, error: clashErr } = await db()
+    .from('va_bookings')
+    .select('id')
+    .eq('workspace_id', workspace.id)
+    .eq('rental_id', target.id)
+    .eq('kind', 'stay')
+    .eq('status', 'confirmed')
+    .neq('id', stay.id)
+    .lt('starts_at', endsAt)
+    .gt('ends_at', startsAt)
+    .limit(1);
+  if (clashErr) throw new Error(`Failed to check availability: ${clashErr.message}`);
+  if (clash.length) return `${target.name} isn’t free for those dates. Suggest other dates or another apartment (check with check_stay_availability).`;
+
+  const total = nights * target.nightly_price_cents;
+  const what = [
+    target.id !== current.id && `apartment ${current.name} → ${target.name}`,
+    (newIn !== oldIn || newOut !== oldOut) && `dates ${oldIn}–${oldOut} → ${newIn}–${newOut}`,
+    guests !== stay.guests && `guests ${stay.guests} → ${guests}`,
+  ]
+    .filter(Boolean)
+    .join(', ');
+  const now = new Date().toISOString();
+  const { error } = await db()
+    .from('va_bookings')
+    .update({
+      rental_id: target.id,
+      starts_at: startsAt,
+      ends_at: endsAt,
+      guests,
+      total_cents: total,
+      updated_at: now,
+      history: [...(stay.history ?? []), { at: now, by: 'call', action: 'changed', summary: `Changed by the guest: ${what}` }],
+    })
+    .eq('workspace_id', workspace.id)
+    .eq('id', stay.id)
+    .eq('status', 'confirmed');
+  if (error?.code === '23P01') return `${target.name} was just booked for some of those nights. Suggest other dates.`;
+  if (error) throw new Error(`Failed to change the booking: ${error.message}`);
+  const diff = total - (stay.total_cents ?? 0);
+  return `Updated: ${target.name}, ${guests} guests, check-in ${describeDate(newIn, settings.timezone)}, check-out ${describeDate(newOut, settings.timezone)}, ${nights} nights. New total ${money(total, settings)} (was ${money(stay.total_cents ?? 0, settings)}; ${diff >= 0 ? `${money(diff, settings)} more` : `${money(-diff, settings)} less`}). The booking reference stays the same.`;
+}
+
+async function cancelStay(workspace: Workspace, args: Record<string, unknown>, callId: string | null) {
+  const settings = await rentalSettings(workspace);
+  if (!settings) return 'Rentals are turned off.';
+  const stay = await verifyStay(workspace, args, callId, 'stay-verify', CHANGE_ATTEMPTS);
+  if (typeof stay === 'string') return stay;
+  const terms = cancellationTerms(stay, settings);
+  if (!terms.allowed) return 'The stay has started, so it can’t be cancelled by phone. Offer to have the host call back.';
+  const now = new Date().toISOString();
+  const summary = terms.free ? 'Cancelled by the guest (free cancellation)' : `Cancelled by the guest: fee ${money(terms.fee, settings)} (${settings.cancel_fee_percent}%)`;
+  const { data, error } = await db()
+    .from('va_bookings')
+    .update({
+      status: 'cancelled',
+      cancelled_at: now,
+      cancellation_fee_cents: terms.fee,
+      updated_at: now,
+      history: [...(stay.history ?? []), { at: now, by: 'call', action: 'cancelled', summary }],
+    })
+    .eq('workspace_id', workspace.id)
+    .eq('id', stay.id)
+    .eq('status', 'confirmed')
+    .select('id');
+  if (error) throw new Error(`Failed to cancel: ${error.message}`);
+  if (!data.length) return 'That booking was already cancelled.';
+  return terms.free
+    ? 'Cancelled, free of charge. Tell the guest any payment is refunded through the platform they paid with.'
+    : `Cancelled. Under the cancellation policy a fee of ${money(terms.fee, settings)} (${settings.cancel_fee_percent}% of the total) applies; the host will settle the rest of the refund.`;
 }
 
 // ---------------------------------------------------------------------------
@@ -652,6 +868,11 @@ function describeDate(date: string, timezone: string) {
     month: 'long',
     day: 'numeric',
   });
+}
+
+/** "482913" -> "482 913", which the agent reads digit by digit. */
+function spokenReference(reference: string) {
+  return `${reference.slice(0, 3)} ${reference.slice(3)}`;
 }
 
 function time12(hhmm: string) {
@@ -697,7 +918,7 @@ export async function runAgentTool(workspace: Workspace, name: string, args: Rec
         const booking = await bookAppointment(workspace, args, { source: 'call', callId });
         const mod = await getModule(workspace.id, 'reservations');
         const local = localParts(new Date(booking.starts_at), mod!.settings.timezone);
-        return `Booked: ${booking.item_name} for ${booking.customer_name} on ${describeDate(local.date, mod!.settings.timezone)} at ${time12(local.time)}. Reference ${booking.id.slice(0, 8).toUpperCase()}.`;
+        return `Booked: ${booking.item_name} for ${booking.customer_name} on ${describeDate(local.date, mod!.settings.timezone)} at ${time12(local.time)}. Booking reference ${spokenReference(booking.reference)}.`;
       }
       case 'get_apartments': {
         const mod = await getModule(workspace.id, 'rentals');
@@ -738,6 +959,12 @@ export async function runAgentTool(workspace: Workspace, name: string, args: Rec
       }
       case 'get_guest_access':
         return guestAccess(workspace, args, callId);
+      case 'find_booking':
+        return describeStay(workspace, args, callId);
+      case 'change_stay':
+        return changeStay(workspace, args, callId);
+      case 'cancel_stay':
+        return cancelStay(workspace, args, callId);
       case 'check_stay_availability': {
         const mod = await getModule(workspace.id, 'rentals');
         if (!mod?.enabled) return 'Rentals are turned off.';
@@ -759,7 +986,7 @@ export async function runAgentTool(workspace: Workspace, name: string, args: Rec
         const booking = await bookStay(workspace, args, { source: 'call', callId });
         const mod = await getModule(workspace.id, 'rentals');
         const settings = mod!.settings;
-        return `Booked: ${booking.item_name} for ${booking.customer_name}, ${booking.guests} guests, check-in ${describeDate(text(args.check_in, 10), settings.timezone)} from ${time12(settings.check_in_time)}, check-out ${describeDate(text(args.check_out, 10), settings.timezone)} by ${time12(settings.check_out_time)}. Total ${formatPrice(booking.total_cents ?? 0, settings.currency)}. Reference ${booking.id.slice(0, 8).toUpperCase()}.`;
+        return `Booked: ${booking.item_name} for ${booking.customer_name}, ${booking.guests} guests, check-in ${describeDate(text(args.check_in, 10), settings.timezone)} from ${time12(settings.check_in_time)}, check-out ${describeDate(text(args.check_out, 10), settings.timezone)} by ${time12(settings.check_out_time)}. Total ${formatPrice(booking.total_cents ?? 0, settings.currency)}. Booking reference ${spokenReference(booking.reference)}.`;
       }
       default:
         return `Unknown function ${name}.`;

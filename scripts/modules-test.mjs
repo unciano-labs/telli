@@ -18,8 +18,8 @@ const KEY = env.RETELL_WEBHOOK_KEY || env.RETELL_API_KEY;
 const TZ = 'Asia/Manila';
 
 /** Calls an agent function as Retell would, from that workspace agent's call. */
-async function tool(agentId, name, args = {}) {
-  const body = JSON.stringify({ name, args, call: { call_id: `call_test_${RUN}`, agent_id: agentId } });
+async function tool(agentId, name, args = {}, callId = `call_test_${RUN}`) {
+  const body = JSON.stringify({ name, args, call: { call_id: callId, agent_id: agentId } });
   const res = await fetch(`${APP}/api/agent-tools`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json', 'x-retell-signature': await sign(body, KEY) },
@@ -156,7 +156,7 @@ try {
   res = await tool(agent2, 'book_stay', {
     apartment: 'Sunset Studio', check_in: checkIn, check_out: plusDays(checkIn, 3), guests: 2, customer_name: 'Carla Lim', customer_phone: '09181112222',
   });
-  check('book_stay books it with the total', /^Booked: Sunset Studio for Carla Lim, 2 guests/.test(res.text) && /Total \$135/.test(res.text), res.text);
+  check('book_stay books it with the total and a 6-digit reference', /^Booked: Sunset Studio for Carla Lim, 2 guests/.test(res.text) && /Total \$135/.test(res.text) && /Booking reference \d{3} \d{3}\./.test(res.text), res.text);
   res = await tool(agent2, 'book_stay', {
     apartment: 'Sunset Studio', check_in: plusDays(checkIn, 1), check_out: plusDays(checkIn, 4), guests: 2, customer_name: 'Dan', customer_phone: '0918',
   });
@@ -172,8 +172,45 @@ try {
   res = await tool(agent2, 'check_stay_availability', { check_in: checkIn, check_out: plusDays(checkIn, 2), guests: 2, apartment: 'sunset' });
   check('a booked apartment no longer shows as free', /Nothing is free/.test(res.text), res.text);
 
-  console.log('\nPrivate apartment details');
+  console.log('\nChanges and cancellations by the guest');
   const api2 = (who, method, path, body) => who.api(method, `/api/w/${ws2.slug}${path}`, body);
+  const carlaRow = (await admin.from('va_bookings').select('id, reference').eq('workspace_id', ws2.id).eq('customer_name', 'Carla Lim').single()).data;
+  check('bookings get a 6-digit reference', /^\d{6}$/.test(carlaRow.reference), carlaRow.reference);
+  // Said the way a caller would: in two groups of three
+  const carla = { booking_reference: `${carlaRow.reference.slice(0, 3)} ${carlaRow.reference.slice(3)}`, phone: '0918 111 2222' };
+  let step = 0;
+  const as = (name, args) => tool(agent2, name, args, `call_change_${RUN}_${step++}`);
+  res = await as('find_booking', { ...carla, phone: '09170000000' });
+  check('a wrong mobile number finds nothing', /No confirmed upcoming stay/.test(res.text), res.text);
+  res = await as('find_booking', carla);
+  check('find_booking reads back the stay and the policy', /Verified stay: Sunset Studio/.test(res.text) && /3 nights, total \$135/.test(res.text) && /Cancelling now is free/.test(res.text), res.text);
+  res = await as('change_stay', { ...carla, check_out: plusDays(checkIn, 4) });
+  check('extending into the next guest’s nights is refused', /isn’t free for those dates/.test(res.text), res.text);
+  res = await as('change_stay', { ...carla, apartment: 'Garden Loft' });
+  check('switching apartment re-prices the stay', /^Updated: Garden Loft/.test(res.text) && /New total \$255 \(was \$135; \$120 more\)/.test(res.text), res.text);
+  res = await as('change_stay', { ...carla, guests: 9 });
+  check('too many guests for the new apartment is refused', /fits up to 5 guests/.test(res.text), res.text);
+  res = await api2(owner, 'PATCH', '/modules', { module: 'rentals', settings: { cancel_free_days: 30, cancel_fee_percent: 50, change_cutoff_hours: 720 } });
+  check('owner tightens the policy (30 days free, 50% fee, changes until 30 days before)', res.status === 200, `got ${res.status} ${res.json?.error ?? ''}`);
+  res = await as('find_booking', carla);
+  check('find_booking now quotes the fee', /Cancelling now costs \$127\.50 \(50% of the total\)/.test(res.text), res.text);
+  const eveRow = (await admin.from('va_bookings').select('id, reference').eq('workspace_id', ws2.id).eq('customer_name', 'Eve').single()).data;
+  const eve = { booking_reference: eveRow.reference, phone: '09190000000' };
+  await admin.from('va_bookings').update({ customer_phone: '09190000000' }).eq('workspace_id', ws2.id).eq('customer_name', 'Eve');
+  res = await as('change_stay', { ...eve, check_in: plusDays(checkIn, 4) });
+  check('moving dates inside the change window is refused', /only possible until 720 hours before check-in/.test(res.text), res.text);
+  res = await as('change_stay', { ...eve, check_out: plusDays(checkIn, 6) });
+  check('but extending check-out is still allowed', /^Updated: Sunset Studio/.test(res.text) && /\$135 \(was \$90; \$45 more\)/.test(res.text), res.text);
+  res = await as('cancel_stay', carla);
+  check('cancelling charges the policy fee', /^Cancelled\. Under the cancellation policy a fee of \$127\.50/.test(res.text), res.text);
+  const cancelled = (await admin.from('va_bookings').select('status, cancellation_fee_cents, history').eq('id', carlaRow.id).single()).data;
+  check('the booking records the fee and both changes', cancelled.status === 'cancelled' && cancelled.cancellation_fee_cents === 12750 && cancelled.history.length === 2,
+    JSON.stringify(cancelled));
+  res = await as('cancel_stay', carla);
+  check('a cancelled booking can’t be found again', /No confirmed upcoming stay/.test(res.text), res.text);
+  check('members still can’t change bookings through the API', (await member.api('DELETE', `/api/w/${ws2.slug}/bookings?id=${carlaRow.id}`)).status === 404);
+
+  console.log('\nPrivate apartment details');
   const apartments = (await api2(owner, 'GET', '/modules')).json.rentals;
   const loft = apartments.find((r) => r.name.startsWith('Garden Loft'));
   res = await api2(owner, 'PUT', `/rentals/private?id=${loft.id}`, { guest_info: 'Key safe left of the gate. Code: 4321', internal_notes: 'Staff code 9999' });
@@ -185,11 +222,10 @@ try {
   const today = new Intl.DateTimeFormat('en-CA', { timeZone: TZ }).format(new Date());
   res = await api2(owner, 'POST', '/bookings', { kind: 'stay', apartment: 'Garden Loft', check_in: today, check_out: plusDays(today, 2), guests: 2, customer_name: 'Gina Guest', customer_phone: '+63 917 555 0101' });
   check('a stay starting today', res.status === 201, `got ${res.status} ${res.json?.error ?? ''}`);
-  const ref = res.json.booking.id.slice(0, 8).toUpperCase();
-  const carla = (await admin.from('va_bookings').select('id').eq('workspace_id', ws2.id).eq('customer_name', 'Carla Lim').single()).data;
+  const ref = res.json.booking.reference;
   res = await tool(agent2, 'get_guest_access', { booking_reference: ref, phone: '09170000000' });
   check('wrong mobile number: no codes', /No confirmed upcoming stay/.test(res.text) && !/4321/.test(res.text), res.text);
-  res = await tool(agent2, 'get_guest_access', { booking_reference: carla.id.slice(0, 8), phone: '09181112222' });
+  res = await tool(agent2, 'get_guest_access', eve);
   check('a stay more than 24 hours away: not yet', /only shared from 24 hours/.test(res.text), res.text);
   res = await tool(agent2, 'get_guest_access', { booking_reference: ref, phone: '0917 555 0101' });
   check('reference + mobile within 24h: the guest gets the code', /Verified guest/.test(res.text) && /4321/.test(res.text) && !/9999/.test(res.text), res.text);
