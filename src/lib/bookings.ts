@@ -4,6 +4,7 @@ import { WEBSITE_ID } from '@/lib/env';
 import { saveDraft } from '@/lib/agent-draft';
 import { getModuleStates } from '@/lib/modules-agent';
 import { formatPrice } from '@/lib/money';
+import { rateLimit } from '@/lib/rate-limit';
 import {
   addDays,
   CURRENCIES,
@@ -55,6 +56,8 @@ export type Service = {
 export type Rental = {
   id: string;
   name: string;
+  /** Short code the business uses, e.g. "ALPA 105". */
+  code: string | null;
   description: string | null;
   address: string | null;
   nightly_price_cents: number;
@@ -62,9 +65,14 @@ export type Rental = {
   bedrooms: number | null;
   amenities: string | null;
   rules: string | null;
+  /** Public extra details (parking, check-in steps, transport): the agent may tell anyone. */
+  details: string | null;
   active: boolean;
   sort: number;
 };
+
+/** Never in public lists: guest_info goes only to verified guests, internal_notes never to the agent. */
+export type RentalPrivate = { guest_info: string | null; internal_notes: string | null };
 
 export type Booking = {
   id: string;
@@ -109,7 +117,7 @@ function validateSettings(module: ModuleId, raw: Record<string, unknown>, curren
   const timezone = raw.timezone ?? current.timezone;
   if (!isTimeZone(timezone)) throw new BookingError('Choose a valid time zone', 400);
   const currency = (raw.currency ?? current.currency) as string;
-  if (!(CURRENCIES as readonly string[]).includes(currency)) throw new BookingError('Choose USD or PHP', 400);
+  if (!(CURRENCIES as readonly string[]).includes(currency)) throw new BookingError('Choose USD, PHP or EUR', 400);
 
   if (module === 'rentals') {
     const cur = current as RentalSettings;
@@ -221,7 +229,7 @@ export async function listServices(workspaceId: string, activeOnly = false): Pro
 export async function listRentals(workspaceId: string, activeOnly = false): Promise<Rental[]> {
   let query = db()
     .from('va_rentals')
-    .select('id, name, description, address, nightly_price_cents, max_guests, bedrooms, amenities, rules, active, sort')
+    .select('id, name, code, description, address, nightly_price_cents, max_guests, bedrooms, amenities, rules, details, active, sort')
     .eq('website_id', WEBSITE_ID)
     .eq('workspace_id', workspaceId)
     .order('sort')
@@ -273,8 +281,36 @@ export function validateRental(body: Record<string, unknown>) {
     bedrooms,
     amenities: optional(body.amenities, 1000),
     rules: optional(body.rules, 2000),
+    code: optional(body.code, 40),
+    details: optional(body.details, 6000),
     active: body.active !== false,
   };
+}
+
+export async function getRentalPrivate(workspace: Workspace, rentalId: string): Promise<RentalPrivate> {
+  const { data, error } = await db()
+    .from('va_rental_private')
+    .select('guest_info, internal_notes')
+    .eq('website_id', WEBSITE_ID)
+    .eq('workspace_id', workspace.id)
+    .eq('rental_id', rentalId)
+    .maybeSingle();
+  if (error) throw new Error(`Failed to load private details: ${error.message}`);
+  return (data as RentalPrivate) ?? { guest_info: null, internal_notes: null };
+}
+
+export async function saveRentalPrivate(workspace: Workspace, rentalId: string, body: Record<string, unknown>): Promise<RentalPrivate> {
+  const rental = (await listRentals(workspace.id)).find((r) => r.id === rentalId);
+  if (!rental) throw new BookingError('Apartment not found', 404);
+  const fields = { guest_info: optional(body.guest_info, 6000), internal_notes: optional(body.internal_notes, 6000) };
+  const { error } = await db()
+    .from('va_rental_private')
+    .upsert(
+      { rental_id: rentalId, website_id: WEBSITE_ID, workspace_id: workspace.id, ...fields, updated_at: new Date().toISOString() },
+      { onConflict: 'rental_id' }
+    );
+  if (error) throw new Error(`Failed to save private details: ${error.message}`);
+  return fields;
 }
 
 type Table = 'va_services' | 'va_rentals';
@@ -356,11 +392,14 @@ export async function cancelBooking(workspace: Workspace, id: string): Promise<v
   if (!data.length) throw new BookingError('Booking not found or already cancelled', 404);
 }
 
-function findByName<T extends { name: string }>(items: T[], name: string): T | null {
+function findByName<T extends { name: string; code?: string | null }>(items: T[], name: string): T | null {
   const wanted = name.trim().toLowerCase();
   if (!wanted) return null;
+  // Codes like "ALPA 105" are matched ignoring spaces and dashes
+  const compact = (v: string) => v.toLowerCase().replace(/[\s\-/]+/g, '');
   return (
     items.find((i) => i.name.toLowerCase() === wanted) ??
+    items.find((i) => i.code && compact(i.code) === compact(wanted)) ??
     items.find((i) => i.name.toLowerCase().includes(wanted) || wanted.includes(i.name.toLowerCase())) ??
     null
   );
@@ -557,6 +596,53 @@ export async function bookStay(
 }
 
 // ---------------------------------------------------------------------------
+// Guest-only details (key safe codes, Wi-Fi, door codes)
+
+const ACCESS_ATTEMPTS = 3;
+const ACCESS_WINDOW_MS = 60 * 60 * 1000;
+const ACCESS_EARLY_MS = 24 * 60 * 60 * 1000;
+
+/**
+ * Gives a caller their apartment's guest-only details, but only if they prove a confirmed
+ * stay: the booking reference plus the phone number on it, from 24 hours before check-in
+ * until check-out (the same rule as sending the code in the chat a day before arrival).
+ * A few tries per call, so a caller can't guess references.
+ */
+async function guestAccess(workspace: Workspace, args: Record<string, unknown>, callId: string | null): Promise<string> {
+  if (!rateLimit(`guest-access:${workspace.id}:${callId ?? 'none'}`, ACCESS_ATTEMPTS, ACCESS_WINDOW_MS).allowed) {
+    return 'Too many tries on this call. Do not share any codes. Tell the caller to message the host through the booking app.';
+  }
+  const reference = text(args.booking_reference, 20).toLowerCase().replace(/[^0-9a-f]/g, '');
+  const phoneDigits = text(args.phone, 40).replace(/\D/g, '');
+  if (reference.length < 8 || phoneDigits.length < 7) {
+    return 'Ask for the 8-character booking reference and the mobile number used for the booking. Do not share any codes without them.';
+  }
+  const { data, error } = await db()
+    .from('va_bookings')
+    .select('id, rental_id, customer_phone, starts_at, ends_at')
+    .eq('website_id', WEBSITE_ID)
+    .eq('workspace_id', workspace.id)
+    .eq('kind', 'stay')
+    .eq('status', 'confirmed')
+    .gte('ends_at', new Date().toISOString())
+    .limit(500);
+  if (error) throw new Error(`Failed to load bookings: ${error.message}`);
+  const lastDigits = (v: string | null) => (v ?? '').replace(/\D/g, '').slice(-7);
+  const booking = (data ?? []).find(
+    (b) => b.id.replace(/-/g, '').startsWith(reference.slice(0, 8)) && lastDigits(b.customer_phone) === phoneDigits.slice(-7)
+  );
+  if (!booking) {
+    return 'No confirmed upcoming stay matches that reference and mobile number. Do not share any codes. Offer to have the host contact them.';
+  }
+  if (Date.now() < Date.parse(booking.starts_at) - ACCESS_EARLY_MS) {
+    return 'The booking is confirmed, but access details are only shared from 24 hours before check-in. Tell the guest they will get them then.';
+  }
+  const { guest_info } = await getRentalPrivate(workspace, booking.rental_id);
+  if (!guest_info) return 'The booking is confirmed, but no access details are on file. Tell the guest the host will send them in the chat.';
+  return `Verified guest. Share these access details with this caller only, slowly and clearly:\n${guest_info}`;
+}
+
+// ---------------------------------------------------------------------------
 // Agent functions (/api/agent-tools): plain-language results for the agent to speak from
 
 function describeDate(date: string, timezone: string) {
@@ -618,20 +704,40 @@ export async function runAgentTool(workspace: Workspace, name: string, args: Rec
         const rentals = await listRentals(workspace.id, true);
         if (!mod?.enabled || !rentals.length) return 'No apartments are set up. Take the caller’s details and say the host will call back.';
         const head = `Check-in from ${time12(mod.settings.check_in_time)}, check-out by ${time12(mod.settings.check_out_time)}.`;
+        // Many apartments: a short line each (Retell caps function results); details come one at a time
+        const brief = rentals.length > 6;
         return [
           head,
           ...rentals.map((r) =>
             [
-              `- ${r.name}: ${formatPrice(r.nightly_price_cents, mod.settings.currency)} per night, up to ${r.max_guests} guests`,
+              `- ${r.name}${r.code ? ` (${r.code})` : ''}: ${formatPrice(r.nightly_price_cents, mod.settings.currency)} per night, up to ${r.max_guests} guests`,
               r.bedrooms !== null ? `, ${r.bedrooms === 0 ? 'studio' : `${r.bedrooms} bedroom${r.bedrooms === 1 ? '' : 's'}`}` : '',
-              r.address ? `. Address: ${r.address}` : '',
-              r.description ? `. ${r.description}` : '',
-              r.amenities ? `. Amenities: ${r.amenities}` : '',
-              r.rules ? `. House rules: ${r.rules}` : '',
+              r.address ? `. Area: ${r.address}` : '',
+              !brief && r.description ? `. ${r.description}` : '',
+              !brief && r.amenities ? `. Amenities: ${r.amenities}` : '',
+              !brief && r.rules ? `. House rules: ${r.rules}` : '',
             ].join('')
           ),
+          ...(brief ? ['For amenities, house rules, parking or directions, call get_apartment_details for one apartment.'] : []),
         ].join('\n');
       }
+      case 'get_apartment_details': {
+        const mod = await getModule(workspace.id, 'rentals');
+        const rental = findByName(await listRentals(workspace.id, true), text(args.apartment, 120));
+        if (!mod?.enabled || !rental) return `There's no apartment called "${text(args.apartment, 120)}". Call get_apartments for the list.`;
+        return [
+          `${rental.name}${rental.code ? ` (${rental.code})` : ''}: ${formatPrice(rental.nightly_price_cents, mod.settings.currency)} per night, up to ${rental.max_guests} guests.`,
+          rental.address && `Area: ${rental.address}.`,
+          rental.description,
+          rental.amenities && `Amenities: ${rental.amenities}.`,
+          rental.rules && `House rules: ${rental.rules}`,
+          rental.details,
+        ]
+          .filter(Boolean)
+          .join('\n');
+      }
+      case 'get_guest_access':
+        return guestAccess(workspace, args, callId);
       case 'check_stay_availability': {
         const mod = await getModule(workspace.id, 'rentals');
         if (!mod?.enabled) return 'Rentals are turned off.';

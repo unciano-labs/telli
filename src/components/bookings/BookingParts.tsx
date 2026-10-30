@@ -91,6 +91,7 @@ export function Agenda({
                         </>
                       )}
                       {b.total_cents ? ` · ${formatPrice(b.total_cents, currencies[b.kind])}` : ''}
+                      {` · ref ${b.id.slice(0, 8).toUpperCase()}`}
                       {` · ${b.source === 'call' ? 'booked by the agent' : 'added by the team'}`}
                       {cancelled && ' · cancelled'}
                     </p>

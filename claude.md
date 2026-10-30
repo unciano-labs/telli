@@ -249,6 +249,7 @@ scripts/lib/harness.mjs             # Shared helpers for those scripts (throwawa
   - Turning a module on adds a "## Bookings" prompt section (today's date and 14-day calendar in the business's time zone) and Retell custom functions to the **draft** via `saveDraft`. `MANAGED_TOOL_NAMES` are rebuilt on every save; other LLM tools are kept. Services, hours and apartments are read live by the functions.
   - Functions call `PUBLIC_APP_URL/api/agent-tools`, so they're only attached when that's a public https address. Locally (no tunnel) the prompt tells the agent to take details instead.
   - Results are plain sentences for the agent; `BookingError`s become "Couldn't do that: …" so the agent can offer alternatives.
+  - Apartments have public fields (incl. `code`, `details`) and private ones in `va_rental_private` (owner/admin RLS): `guest_info` is returned by `get_guest_access` only after the caller gives a confirmed stay's booking reference (first 8 characters of the booking id) and the mobile number on it, from 24h before check-in to check-out, at most 3 tries per call; `internal_notes` are never sent to the agent. With more than 6 apartments `get_apartments` lists essentials and `get_apartment_details` gives one apartment's public details.
   - Appointments allow `capacity` at once (`va_book_appointment`, advisory lock); stays can't overlap per apartment (exclusion constraint, `btree_gist`).
   - Onboarding offers modules suggested by the template and seeds sample services or apartments.
   - Setup lives in Agent → Modules (admins). The workspace's **Bookings** tab (members; only while a module is on, via `modules` in `WorkspaceContext`) is the live view: it polls `/api/w/[slug]/bookings` every 15 seconds while visible and marks new bookings.
@@ -299,6 +300,7 @@ Multitenant tables are prefixed `va_` and keyed by `website_id` and `workspace_i
 9. `supabase/migrations/20261104_voice_agent_phone_numbers.sql`: `va_phone_numbers` (member-read RLS), with the platform's existing Twilio number backfilled
 10. `supabase/migrations/20261105_voice_agent_billing.sql`: `va_plans` (seeded, server-only), `va_payments` (owner-read RLS), `current_period_end` on `va_workspaces`, and `va_workspace_usage_since` / `va_apply_payment` (service role only)
 11. `supabase/migrations/20261106_voice_agent_usd_and_modules.sql`: USD plan prices and charged-in-PHP columns on `va_payments`; `va_workspace_modules`, `va_services`, `va_rentals`, `va_bookings` (member-read RLS) and `va_book_appointment`
+12. `supabase/migrations/20261107_voice_agent_rental_details.sql`: apartment `code` / `details`, and `va_rental_private` (guest-only and team-only details, owner/admin RLS)
 
 ### C. Core Backend Implementations
 

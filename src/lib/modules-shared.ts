@@ -54,7 +54,7 @@ export const MODULES: Record<ModuleId, { label: string; description: string; sug
   },
 };
 
-export const CURRENCIES = ['USD', 'PHP'] as const;
+export const CURRENCIES = ['USD', 'PHP', 'EUR'] as const;
 export const DEFAULT_TIMEZONE = 'Asia/Manila';
 
 const weekdays = (range: TimeRange[]) => ({ mon: range, tue: range, wed: range, thu: range, fri: range });

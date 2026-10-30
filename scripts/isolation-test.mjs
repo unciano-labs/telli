@@ -76,7 +76,7 @@ try {
     'va_workspaces', 'va_workspace_members', 'va_workspace_invites', 'va_agent_configs', 'va_agent_documents',
     'va_call_logs', 'va_widgets', 'va_widget_events', 'va_agent_faqs', 'va_agent_rules', 'va_agent_changes',
     'va_agent_test_cases', 'va_agent_test_runs', 'va_agent_questions', 'va_agent_corrections', 'va_phone_numbers',
-    'va_payments', 'va_workspace_modules', 'va_services', 'va_rentals', 'va_bookings',
+    'va_payments', 'va_workspace_modules', 'va_services', 'va_rentals', 'va_bookings', 'va_rental_private',
   ]) {
     const column = table === 'va_workspaces' ? 'id' : 'workspace_id';
     const { data, error } = await b.db.from(table).select('*').eq(column, A.id);

@@ -13,7 +13,7 @@ export const AGENT_TOOLS_PATH = '/api/agent-tools';
 
 const MODULE_TOOL_NAMES: Record<ModuleId, string[]> = {
   reservations: ['get_services', 'check_availability', 'book_appointment'],
-  rentals: ['get_apartments', 'check_stay_availability', 'book_stay'],
+  rentals: ['get_apartments', 'get_apartment_details', 'check_stay_availability', 'book_stay', 'get_guest_access'],
 };
 /** Tools this app manages on a workspace LLM (replaced on every draft save). */
 export const MANAGED_TOOL_NAMES = new Set(['end_call', ...Object.values(MODULE_TOOL_NAMES).flat()]);
@@ -84,7 +84,13 @@ export function moduleTools(modules: ModuleState[]) {
       );
     } else {
       tools.push(
-        tool('get_apartments', 'List the apartments: price per night, address, guests, bedrooms, amenities and house rules.'),
+        tool('get_apartments', 'List the apartments: price per night, area, guests and bedrooms (with amenities and house rules when there are only a few).'),
+        tool(
+          'get_apartment_details',
+          'Everything public about one apartment: amenities, house rules, parking, check-in steps, transport and nearby places.',
+          { apartment: string('The apartment name or code') },
+          ['apartment']
+        ),
         tool(
           'check_stay_availability',
           'Find which apartments are free for a stay, with the total price. Always call this before quoting or confirming dates.',
@@ -109,6 +115,15 @@ export function moduleTools(modules: ModuleState[]) {
             notes: string('Arrival time or requests (optional)'),
           },
           ['apartment', 'check_in', 'check_out', 'guests', 'customer_name', 'customer_phone']
+        ),
+        tool(
+          'get_guest_access',
+          'Key safe code, Wi-Fi and door codes for a guest with a confirmed stay. Needs the booking reference and the mobile number on the booking; it checks both.',
+          {
+            booking_reference: string('The 8-character booking reference the guest was given'),
+            phone: string('The mobile number used for the booking'),
+          },
+          ['booking_reference', 'phone']
         )
       );
     }
@@ -127,8 +142,13 @@ export function modulesPrompt(modules: ModuleState[]): string {
     '- Never say something is available, or quote a total, without checking with a function first. Don’t invent services, apartments, prices or times.',
     '- Offer at most three options at a time.',
     '- Before booking, read back the details (what, when, name, mobile number) and wait for a clear yes.',
-    '- After booking, confirm it in one sentence. If a function says something is no longer free, offer the alternatives it gives.',
+    '- After booking, confirm it in one sentence and read the booking reference slowly. If a function says something is no longer free, offer the alternatives it gives.',
   ];
+  if (modules.some((m) => m.module === 'rentals')) {
+    lines.push(
+      '- Key safe codes, Wi-Fi passwords, door and gate codes are secret. Only share them when get_guest_access returns them during this call, never from memory, and never to someone who can’t give the booking reference and mobile number. You never know staff codes.'
+    );
+  }
   if (!publicAppUrl()) {
     lines.push('- Booking functions aren’t connected yet. Take the caller’s details and preferred time, and say the team will confirm by text.');
   }

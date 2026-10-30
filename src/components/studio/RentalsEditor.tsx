@@ -77,11 +77,18 @@ export function RentalSettingsForm({
   );
 }
 
-type Draft = Record<'name' | 'nightly_price' | 'max_guests' | 'bedrooms' | 'address' | 'description' | 'amenities' | 'rules', string> & {
+type Draft = Record<
+  'name' | 'code' | 'nightly_price' | 'max_guests' | 'bedrooms' | 'address' | 'description' | 'amenities' | 'rules' | 'details' | 'guest_info' | 'internal_notes',
+  string
+> & {
   active: boolean;
 };
 const EMPTY: Draft = {
   name: '',
+  code: '',
+  details: '',
+  guest_info: '',
+  internal_notes: '',
   nightly_price: '',
   max_guests: '2',
   bedrooms: '1',
@@ -102,13 +109,17 @@ export function RentalsList({ initial, currency, canEdit }: { initial: Rental[];
   const set = (key: keyof Draft) => (e: React.ChangeEvent<HTMLInputElement | HTMLTextAreaElement>) =>
     setDraft((d) => ({ ...d, [key]: e.target.value }));
 
-  function edit(r?: Rental) {
+  async function edit(r?: Rental) {
     setError(null);
     setEditing(r?.id ?? 'new');
     setDraft(
       r
         ? {
             name: r.name,
+            code: r.code ?? '',
+            details: r.details ?? '',
+            guest_info: '',
+            internal_notes: '',
             nightly_price: String(r.nightly_price_cents / 100),
             max_guests: String(r.max_guests),
             bedrooms: r.bedrooms === null ? '' : String(r.bedrooms),
@@ -120,6 +131,15 @@ export function RentalsList({ initial, currency, canEdit }: { initial: Rental[];
           }
         : EMPTY
     );
+    // Private details load separately (owners and admins only)
+    if (r) {
+      try {
+        const { private: details } = await send(`${api}/rentals/private?id=${r.id}`, 'GET');
+        setDraft((d) => ({ ...d, guest_info: details.guest_info ?? '', internal_notes: details.internal_notes ?? '' }));
+      } catch (err) {
+        setError((err as Error).message);
+      }
+    }
   }
 
   async function save(e: React.FormEvent) {
@@ -133,6 +153,7 @@ export function RentalsList({ initial, currency, canEdit }: { initial: Rental[];
         max_guests: Number(draft.max_guests),
         bedrooms: draft.bedrooms === '' ? null : Number(draft.bedrooms),
       });
+      await send(`${api}/rentals/private?id=${item.id}`, 'PUT', { guest_info: draft.guest_info, internal_notes: draft.internal_notes });
       setRentals((list) => (id ? list.map((r) => (r.id === id ? item : r)) : [...list, item]));
       setEditing(null);
     } catch (err) {
@@ -156,9 +177,13 @@ export function RentalsList({ initial, currency, canEdit }: { initial: Rental[];
   const form = (
     <form onSubmit={save} className="space-y-3 rounded-xl bg-slate-50 p-4 ring-1 ring-slate-200">
       <div className="grid gap-3 sm:grid-cols-4">
-        <label className="block text-sm font-medium text-slate-700 sm:col-span-2">
+        <label className="block text-sm font-medium text-slate-700">
           Name
           <input className={inputCls} required maxLength={120} value={draft.name} onChange={set('name')} placeholder="Sunset Studio" />
+        </label>
+        <label className="block text-sm font-medium text-slate-700">
+          Code <span className="font-normal text-slate-400">optional</span>
+          <input className={inputCls} maxLength={40} value={draft.code} onChange={set('code')} placeholder="ALPA 105" />
         </label>
         <label className="block text-sm font-medium text-slate-700">
           Per night ({currency})
@@ -188,7 +213,26 @@ export function RentalsList({ initial, currency, canEdit }: { initial: Rental[];
           House rules
           <textarea rows={2} className={inputCls} maxLength={2000} value={draft.rules} onChange={set('rules')} placeholder="No smoking. Quiet hours 10 PM to 7 AM." />
         </label>
+        <label className="block text-sm font-medium text-slate-700 sm:col-span-4">
+          More details <span className="font-normal text-slate-400">public: parking, check-in steps, transport, nearby places</span>
+          <textarea rows={3} className={inputCls} maxLength={6000} value={draft.details} onChange={set('details')} />
+        </label>
       </div>
+      <fieldset className="space-y-3 rounded-xl bg-amber-50/60 p-3 ring-1 ring-amber-200">
+        <legend className="px-1 text-sm font-semibold text-amber-900">Private</legend>
+        <label className="block text-sm font-medium text-slate-700">
+          For guests only <span className="font-normal text-slate-500">key safe code and spot, Wi-Fi, door or gate codes, exact unit</span>
+          <textarea rows={3} className={inputCls} maxLength={6000} value={draft.guest_info} onChange={set('guest_info')} placeholder={'Key safe: left of the mailboxes, code 1234\nWi-Fi: MyNetwork / password'} />
+          <span className="mt-1 block text-xs font-normal text-slate-500">
+            The agent only reads this to a caller who gives a confirmed booking’s reference and mobile number, from 24 hours before check-in until check-out.
+          </span>
+        </label>
+        <label className="block text-sm font-medium text-slate-700">
+          Team only <span className="font-normal text-slate-500">staff codes, contract dates, internal notes</span>
+          <textarea rows={2} className={inputCls} maxLength={6000} value={draft.internal_notes} onChange={set('internal_notes')} />
+          <span className="mt-1 block text-xs font-normal text-slate-500">Never sent to the agent. Only owners and admins can see it.</span>
+        </label>
+      </fieldset>
       <label className="inline-flex items-center gap-2 text-sm text-slate-700">
         <input type="checkbox" checked={draft.active} onChange={(e) => setDraft((d) => ({ ...d, active: e.target.checked }))} className="rounded text-indigo-600" />
         Bookable
@@ -217,7 +261,10 @@ export function RentalsList({ initial, currency, canEdit }: { initial: Rental[];
           ) : (
             <li key={r.id} className="rounded-xl p-4 text-sm ring-1 ring-slate-200">
               <div className="flex items-start gap-2">
-                <p className={`min-w-0 flex-1 font-medium ${r.active ? 'text-slate-900' : 'text-slate-400 line-through'}`}>{r.name}</p>
+                <p className={`min-w-0 flex-1 font-medium ${r.active ? 'text-slate-900' : 'text-slate-400 line-through'}`}>
+                  {r.name}
+                  {r.code && <span className="ml-1.5 text-xs font-normal text-slate-500">{r.code}</span>}
+                </p>
                 <p className="font-semibold text-slate-900">
                   {formatPrice(r.nightly_price_cents, currency)}
                   <span className="text-xs font-normal text-slate-500">/night</span>

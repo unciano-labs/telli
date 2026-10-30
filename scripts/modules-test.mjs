@@ -172,6 +172,33 @@ try {
   res = await tool(agent2, 'check_stay_availability', { check_in: checkIn, check_out: plusDays(checkIn, 2), guests: 2, apartment: 'sunset' });
   check('a booked apartment no longer shows as free', /Nothing is free/.test(res.text), res.text);
 
+  console.log('\nPrivate apartment details');
+  const api2 = (who, method, path, body) => who.api(method, `/api/w/${ws2.slug}${path}`, body);
+  const apartments = (await api2(owner, 'GET', '/modules')).json.rentals;
+  const loft = apartments.find((r) => r.name.startsWith('Garden Loft'));
+  res = await api2(owner, 'PUT', `/rentals/private?id=${loft.id}`, { guest_info: 'Key safe left of the gate. Code: 4321', internal_notes: 'Staff code 9999' });
+  check('owner saves guest-only and team-only details', res.status === 200, `got ${res.status} ${res.json?.error ?? ''}`);
+  res = await tool(agent2, 'get_apartment_details', { apartment: 'garden loft' });
+  check('public details never include private ones', /Garden Loft/.test(res.text) && !/4321|9999/.test(res.text), res.text);
+  res = await tool(agent2, 'get_apartments');
+  check('nor does the apartment list', !/4321|9999/.test(res.text));
+  const today = new Intl.DateTimeFormat('en-CA', { timeZone: TZ }).format(new Date());
+  res = await api2(owner, 'POST', '/bookings', { kind: 'stay', apartment: 'Garden Loft', check_in: today, check_out: plusDays(today, 2), guests: 2, customer_name: 'Gina Guest', customer_phone: '+63 917 555 0101' });
+  check('a stay starting today', res.status === 201, `got ${res.status} ${res.json?.error ?? ''}`);
+  const ref = res.json.booking.id.slice(0, 8).toUpperCase();
+  const carla = (await admin.from('va_bookings').select('id').eq('workspace_id', ws2.id).eq('customer_name', 'Carla Lim').single()).data;
+  res = await tool(agent2, 'get_guest_access', { booking_reference: ref, phone: '09170000000' });
+  check('wrong mobile number: no codes', /No confirmed upcoming stay/.test(res.text) && !/4321/.test(res.text), res.text);
+  res = await tool(agent2, 'get_guest_access', { booking_reference: carla.id.slice(0, 8), phone: '09181112222' });
+  check('a stay more than 24 hours away: not yet', /only shared from 24 hours/.test(res.text), res.text);
+  res = await tool(agent2, 'get_guest_access', { booking_reference: ref, phone: '0917 555 0101' });
+  check('reference + mobile within 24h: the guest gets the code', /Verified guest/.test(res.text) && /4321/.test(res.text) && !/9999/.test(res.text), res.text);
+  res = await tool(agent2, 'get_guest_access', { booking_reference: ref, phone: '0917 555 0101' });
+  check('at most 3 tries per call', /Too many tries/.test(res.text), res.text);
+  check('members can’t read private details', (await member.api('GET', `/api/w/${ws2.slug}/rentals/private?id=${loft.id}`)).status === 404);
+  check('outsiders read no private details directly (RLS)', ((await outsider.db.from('va_rental_private').select('rental_id').eq('workspace_id', ws2.id)).data ?? []).length === 0);
+  check('the owner can (RLS: owners and admins)', ((await owner.db.from('va_rental_private').select('rental_id').eq('workspace_id', ws2.id)).data ?? []).length === 1);
+
   console.log('\nIsolation between workspaces');
   res = await tool(agent2, 'get_services');
   check('the rental agent can’t see the clinic’s services', /No services are set up/.test(res.text), res.text);
