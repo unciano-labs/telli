@@ -25,6 +25,12 @@ export const DEMO_SCENARIOS = [
     description: 'Tracks orders and explains returns and shipping.',
     tryAsking: ['Where is order 1042?', 'Can I return a shirt that doesn’t fit?'],
   },
+  {
+    id: 'rental',
+    name: 'Short-term rental host',
+    description: 'Helps guests pick an apartment, quotes the stay, books it, and answers check-in questions.',
+    tryAsking: ['Do you have a place for 4 people next weekend?', 'What time is check-in, and is there parking?'],
+  },
 ] as const;
 
 export type DemoScenarioId = (typeof DEMO_SCENARIOS)[number]['id'];

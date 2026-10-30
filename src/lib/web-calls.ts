@@ -35,6 +35,8 @@ export async function startWebCall(input: {
   userId?: string | null;
   /** Defaults to the workspace's agent. */
   agentId?: string;
+  /** With agentId: the version to pin (e.g. another workspace’s published version, in the demo). */
+  agentVersion?: number;
   /**
    * Ends the call sooner than the agent's 5-minute cap (demo allowances). Retell's floor is
    * 1 minute, so shorter allowances must also be ended by the client.
@@ -54,7 +56,7 @@ export async function startWebCall(input: {
 
   let agentId = input.agentId;
   // Unpinned calls get the newest version, which may be an unpublished draft
-  let agentVersion: number | undefined;
+  let agentVersion: number | undefined = input.agentVersion;
   // The workspace agent's calls feed the studio's Improve tab, whichever version answers
   const analyze = !agentId;
   if (!agentId) {

@@ -25,11 +25,14 @@ export default function DemoExperience({
   contactUrl,
   email,
   supportAgentName,
+  liveNames = {},
 }: {
   initialStatus: DemoStatus;
   contactUrl: string | null;
   email: string;
   supportAgentName: string;
+  /** Scenarios that call a real business's agent, by business name (e.g. rental). */
+  liveNames?: Partial<Record<DemoScenarioId, string>>;
 }) {
   const [status, setStatus] = useState(initialStatus);
   const [scenario, setScenario] = useState<DemoScenarioId>('clinic');
@@ -96,8 +99,13 @@ export default function DemoExperience({
                 onClick={() => setScenario(s.id)}
                 className={`rounded-2xl p-4 text-left transition disabled:cursor-not-allowed ${active ? 'bg-white shadow-sm ring-2 ring-indigo-600' : 'bg-white/60 ring-1 ring-slate-200 hover:bg-white disabled:opacity-60'}`}
               >
-                <p className="font-medium text-slate-900">{s.id === 'support' ? supportAgentName : s.name}</p>
+                <p className="font-medium text-slate-900">{s.id === 'support' ? supportAgentName : (liveNames[s.id] ?? s.name)}</p>
                 <p className="mt-1 text-sm text-slate-500">{s.description}</p>
+                {liveNames[s.id] && (
+                  <p className="mt-2 inline-flex rounded-full bg-emerald-50 px-2 py-0.5 text-xs font-medium text-emerald-700 ring-1 ring-emerald-200">
+                    Real business · live availability
+                  </p>
+                )}
               </button>
             );
           })}
@@ -188,7 +196,9 @@ export default function DemoExperience({
               <Headset className="h-10 w-10" strokeWidth={1.5} />
             </div>
           </div>
-          <p className="mt-4 font-semibold text-slate-900">{scenario === 'support' ? supportAgentName : selected.name}</p>
+          <p className="mt-4 font-semibold text-slate-900">
+            {scenario === 'support' ? supportAgentName : (liveNames[scenario] ?? selected.name)}
+          </p>
           <p className="text-sm text-slate-500">
             {callStatus === 'active'
               ? `${agentTalking ? 'Speaking…' : muted ? 'Your mic is muted' : 'Listening…'} · ${formatDuration(seconds)}`

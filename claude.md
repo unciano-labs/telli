@@ -282,6 +282,7 @@ scripts/lib/harness.mjs             # Shared helpers for those scripts (throwawa
   - A daily budget across all users is the kill switch.
   - Scenarios run on a separate demo agent (`va_demo_settings.retell_agent_id`, created on the first **Platform → Demo** visit or the first scenario call). Its prompt is `{{demo_instructions}}` plus fixed rules, filled per call through dynamic variables.
   - "Our support agent" uses the platform workspace's agent, and demo calls are logged under the platform workspace.
+  - A scenario can instead call a real workspace's **published** agent (`va_demo_settings.scenario_workspaces`, set in Platform → Demo; today only `rental`, from workspaces with Short-term rentals on). The call is pinned to that workspace's `live_version`, still logged and budgeted as a demo call under the platform workspace, and its bookings land on that workspace's Bookings tab (agent functions find the workspace by agent ID). The demo page labels it with the business name.
   - The demo agent is multilingual: `language` is a list of 21 locales (the most Retell's speech recognition accepts together) with the `11labs-Lily` voice on `eleven_flash_v2_5`. Filipino can't join that list, so the demo's "Filipino / Taglish" mode sets `agent_override.agent.language: 'fil-PH'` per call. Opening **Platform → Demo** syncs the demo agent's prompt, voice and languages from `lib/demo.ts`.
   - Retell rejects a `max_call_duration_ms` under 1 minute, so `startWebCall` never sends less; the demo page ends a shorter allowance itself.
   - Signup rejects disposable email domains.
@@ -301,6 +302,7 @@ Multitenant tables are prefixed `va_` and keyed by `website_id` and `workspace_i
 10. `supabase/migrations/20261105_voice_agent_billing.sql`: `va_plans` (seeded, server-only), `va_payments` (owner-read RLS), `current_period_end` on `va_workspaces`, and `va_workspace_usage_since` / `va_apply_payment` (service role only)
 11. `supabase/migrations/20261106_voice_agent_usd_and_modules.sql`: USD plan prices and charged-in-PHP columns on `va_payments`; `va_workspace_modules`, `va_services`, `va_rentals`, `va_bookings` (member-read RLS) and `va_book_appointment`
 12. `supabase/migrations/20261107_voice_agent_rental_details.sql`: apartment `code` / `details`, and `va_rental_private` (guest-only and team-only details, owner/admin RLS)
+13. `supabase/migrations/20261108_voice_agent_demo_live_agents.sql`: `scenario_workspaces` on `va_demo_settings` (which demo scenario calls which workspace's live agent)
 
 ### C. Core Backend Implementations
 

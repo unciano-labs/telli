@@ -10,6 +10,8 @@ type Settings = {
   seconds_per_user: number;
   daily_budget_minutes: number;
   contact_url: string | null;
+  /** Scenario id -> workspace id whose published agent that scenario calls. */
+  scenario_workspaces: Record<string, string>;
 };
 
 export type LeadView = {
@@ -68,11 +70,14 @@ export default function DemoAdmin({
   budget,
   leads,
   demoAgentId,
+  liveOptions,
 }: {
   initialSettings: Settings;
   budget: { budgetSeconds: number; usedSeconds: number };
   leads: LeadView[];
   demoAgentId: string | null;
+  /** Workspaces each live-capable scenario may call (e.g. rental -> workspaces with Rentals on). */
+  liveOptions: Record<string, { id: string; name: string }[]>;
 }) {
   const [saved, setSaved] = useState(initialSettings);
   const [form, setForm] = useState({
@@ -80,6 +85,7 @@ export default function DemoAdmin({
     minutes: String(initialSettings.seconds_per_user / 60),
     budget: String(initialSettings.daily_budget_minutes),
     contact: initialSettings.contact_url ?? '',
+    rental: initialSettings.scenario_workspaces.rental ?? '',
   });
   const [saving, setSaving] = useState(false);
   const [toast, setToast] = useState<Toast>(null);
@@ -90,6 +96,7 @@ export default function DemoAdmin({
     seconds_per_user: Math.round(Number(form.minutes) * 60),
     daily_budget_minutes: Number(form.budget),
     contact_url: form.contact.trim() || null,
+    scenario_workspaces: form.rental ? { rental: form.rental } : {},
   };
   const dirty = JSON.stringify(payload) !== JSON.stringify(saved);
 
@@ -116,6 +123,7 @@ export default function DemoAdmin({
         seconds_per_user: s.seconds_per_user,
         daily_budget_minutes: s.daily_budget_minutes,
         contact_url: s.contact_url,
+        scenario_workspaces: s.scenario_workspaces ?? {},
       });
       setToast({ kind: 'success', text: 'Demo settings saved.' });
     } catch (err) {
@@ -186,6 +194,21 @@ export default function DemoAdmin({
             />
             <span className="mt-1 block text-xs font-normal text-slate-400">
               Shown when someone uses up their free time. Leave empty to say you’ll email them.
+            </span>
+          </label>
+          <label className="block text-sm font-medium text-slate-700">
+            “Short-term rental host” calls
+            <select className={inputCls} value={form.rental} onChange={(e) => set('rental', e.target.value)}>
+              <option value="">The sample business (Larnaca Stays, pretend bookings)</option>
+              {(liveOptions.rental ?? []).map((w) => (
+                <option key={w.id} value={w.id}>
+                  {w.name}: its live agent, real apartments and bookings
+                </option>
+              ))}
+            </select>
+            <span className="mt-1 block text-xs font-normal text-slate-400">
+              A workspace’s published agent answers, and bookings made in the demo appear on that workspace’s Bookings tab. Only
+              workspaces with Short-term rentals turned on are listed.
             </span>
           </label>
           <div className="flex flex-wrap items-center justify-between gap-3 border-t border-slate-100 pt-4">

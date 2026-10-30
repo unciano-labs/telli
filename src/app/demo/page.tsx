@@ -9,7 +9,7 @@ import { createClient } from '@/lib/supabase/server';
 import { hasWebsiteAccess } from '@/lib/auth';
 import { findAgentConfig } from '@/lib/agent-config';
 import { getPlatformWorkspace } from '@/lib/workspaces';
-import { getDemoSettings, getDemoStatus } from '@/lib/demo';
+import { getDemoSettings, getDemoStatus, liveScenarioNames } from '@/lib/demo';
 import { errorMessage } from '@/lib/retell';
 
 export const metadata: Metadata = {
@@ -62,11 +62,12 @@ async function DemoGate() {
 
   let loaded;
   try {
-    const [status, config] = await Promise.all([
+    const [status, config, liveNames] = await Promise.all([
       getDemoStatus(user.id),
       getPlatformWorkspace().then((ws) => findAgentConfig(ws.id)),
+      liveScenarioNames(settings ?? null),
     ]);
-    loaded = { status, agentName: config?.agent_name ?? 'Customer Support' };
+    loaded = { status, agentName: config?.agent_name ?? 'Customer Support', liveNames };
   } catch (error) {
     console.error('[demo] status', errorMessage(error));
     return (
@@ -82,6 +83,7 @@ async function DemoGate() {
       contactUrl={settings?.contact_url ?? null}
       email={user.email ?? ''}
       supportAgentName={loaded.agentName}
+      liveNames={loaded.liveNames}
     />
   );
 }

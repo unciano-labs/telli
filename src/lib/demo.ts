@@ -4,10 +4,11 @@ import { getRetell } from '@/lib/retell';
 import { WEBSITE_ID } from '@/lib/env';
 import { MAX_CALL_DURATION_MS } from '@/lib/constants';
 import { ANALYTICS_TZ } from '@/lib/analytics';
-import { getOrProvisionAgentConfig, syncAgentWebhook } from '@/lib/agent-config';
+import { findAgentConfig, getOrProvisionAgentConfig, syncAgentWebhook } from '@/lib/agent-config';
 import { refreshUnfinishedCalls } from '@/lib/call-logs';
 import { startWebCall, type WebCallToken } from '@/lib/web-calls';
-import { getPlatformWorkspace } from '@/lib/workspaces';
+import { findWorkspaceById, getPlatformWorkspace } from '@/lib/workspaces';
+import type { ModuleId } from '@/lib/modules-shared';
 import type { DemoLanguageId, DemoScenarioId, DemoStatus } from '@/lib/demo-config';
 import type { AgentLanguage } from '@/lib/web-calls';
 
@@ -20,12 +21,55 @@ export type DemoSettings = {
   retell_agent_id: string | null;
   retell_llm_id: string | null;
   retell_webhook_url: string | null;
+  /** Scenario id -> workspace id: that scenario calls the workspace's published agent (e.g. rental). */
+  scenario_workspaces: Partial<Record<DemoScenarioId, string>>;
   updated_at: string;
 };
 
 export type DemoSettingsUpdate = Partial<
-  Pick<DemoSettings, 'enabled' | 'seconds_per_user' | 'daily_budget_minutes' | 'contact_url'>
+  Pick<DemoSettings, 'enabled' | 'seconds_per_user' | 'daily_budget_minutes' | 'contact_url' | 'scenario_workspaces'>
 >;
+
+/** Scenarios that can use a real workspace's agent, and the module that workspace needs. */
+export const LIVE_SCENARIOS = { rental: 'rentals' } as const satisfies Partial<Record<DemoScenarioId, ModuleId>>;
+type LiveScenario = keyof typeof LIVE_SCENARIOS;
+
+/** Workspaces a live scenario may use: those with the matching module on and a published agent. */
+export async function liveScenarioOptions(): Promise<Record<LiveScenario, { id: string; name: string }[]>> {
+  const { data, error } = await db()
+    .from('va_workspace_modules')
+    .select('module, workspace_id, va_workspaces!inner(name, website_id)')
+    .eq('website_id', WEBSITE_ID)
+    .eq('enabled', true);
+  if (error) throw new Error(`Failed to load workspaces: ${error.message}`);
+  const rows = data as unknown as { module: ModuleId; workspace_id: string; va_workspaces: { name: string } }[];
+  return Object.fromEntries(
+    (Object.keys(LIVE_SCENARIOS) as LiveScenario[]).map((scenario) => [
+      scenario,
+      rows.filter((r) => r.module === LIVE_SCENARIOS[scenario]).map((r) => ({ id: r.workspace_id, name: r.va_workspaces.name })),
+    ])
+  ) as Record<LiveScenario, { id: string; name: string }[]>;
+}
+
+/** The workspace (and its agent) a scenario calls, if it's set to a live agent that's ready. */
+async function liveScenarioAgent(settings: DemoSettings, scenario: DemoScenarioId) {
+  const workspaceId = settings.scenario_workspaces?.[scenario];
+  if (!workspaceId) return null;
+  const [workspace, config] = await Promise.all([findWorkspaceById(workspaceId), findAgentConfig(workspaceId)]);
+  if (!workspace || workspace.status === 'suspended' || !config || config.live_version === null) return null;
+  return { workspace, config };
+}
+
+/** Names of the businesses behind live scenarios, for the demo page. */
+export async function liveScenarioNames(settings: DemoSettings | null): Promise<Partial<Record<DemoScenarioId, string>>> {
+  if (!settings) return {};
+  const names: Partial<Record<DemoScenarioId, string>> = {};
+  for (const scenario of Object.keys(LIVE_SCENARIOS) as LiveScenario[]) {
+    const live = await liveScenarioAgent(settings, scenario).catch(() => null);
+    if (live) names[scenario] = live.workspace.name;
+  }
+  return names;
+}
 
 export type DemoLead = {
   user_id: string;
@@ -115,6 +159,28 @@ Qualify the caller, suggest the best matches, then set a property viewing.
 
 ## Close
 Suggest the one or two best matches. Offer a viewing time, get their name and mobile number, then summarize what was agreed.`,
+  },
+  rental: {
+    greeting: 'Hi, thanks for calling Larnaca Stays, this is Elena! Are you looking to book a stay?',
+    instructions: `You are Elena, the guest assistant for Larnaca Stays, a small company renting apartments in Larnaca, Cyprus. Prices are in euros.
+
+## Apartments
+- Sunset Studio, Touzhane area: 1 bedroom, sleeps 2. 65 euros a night. Free street parking.
+- Seaside Two-Bedroom, near Finikoudes beach: 2 bedrooms, 1 bathroom, sleeps 6 with the sofa bed. 85 euros a night. One free covered parking spot.
+- Palm Court Family Apartment, Umm Haram street: 3 bedrooms, 2 bathrooms, sleeps 6. 120 euros a night. Free street parking.
+- All have Wi-Fi, Netflix TV, air conditioning, a washing machine and a kitchen with an oven. Hot water is solar, with a boost button for cloudy days.
+
+## Policies
+- Check-in from 4 PM to 10 PM with a self check-in key safe; the code is sent in the booking chat 24 hours before arrival. Early check-in or late check-out must be booked in advance.
+- Check-out by 11 AM; leave the keys on the bedroom nightstand.
+- Extra guests cost 5 euros per person per night. Quiet hours 10 PM to 8 AM. No parties.
+- From the airport: bus 425 every 15 minutes, or a taxi for about 15 to 20 euros.
+
+## Your job
+- Ask for the dates and the number of guests, then suggest the best one or two apartments and quote the total (nights times the nightly price).
+- Most dates are free. To book, get the guest's name and mobile number, then confirm the apartment, dates, guests and total, and give a booking reference like LS-4821.
+- Never give key safe codes, Wi-Fi passwords or door codes on the phone. They are sent in the booking chat 24 hours before arrival.
+- For problems during a stay, take the details and say the host will call back within 15 minutes.`,
   },
   online_store: {
     greeting: 'Hi! Thanks for calling Habi Threads, this is Kai. How can I help?',
@@ -253,11 +319,32 @@ export function validateDemoSettings(body: Record<string, unknown>): DemoSetting
     }
     update.contact_url = raw || null;
   }
+  if (body.scenario_workspaces !== undefined) {
+    const raw = (body.scenario_workspaces ?? {}) as Record<string, unknown>;
+    const map: Partial<Record<DemoScenarioId, string>> = {};
+    for (const [scenario, id] of Object.entries(raw)) {
+      if (!(scenario in LIVE_SCENARIOS)) throw new DemoError('That scenario can’t use a live agent', 400);
+      if (id === null || id === '') continue;
+      if (typeof id !== 'string' || !/^[0-9a-f-]{36}$/i.test(id)) throw new DemoError('Choose a workspace', 400);
+      map[scenario as DemoScenarioId] = id;
+    }
+    update.scenario_workspaces = map;
+  }
   return update;
 }
 
 export async function updateDemoSettings(update: DemoSettingsUpdate): Promise<DemoSettings> {
   await ensureDemoAgent();
+  if (update.scenario_workspaces) {
+    const options = await liveScenarioOptions();
+    for (const [scenario, id] of Object.entries(update.scenario_workspaces)) {
+      if (!options[scenario as LiveScenario]?.some((w) => w.id === id)) {
+        throw new DemoError('That workspace doesn’t have the module this scenario needs turned on', 400);
+      }
+      const config = await findAgentConfig(id);
+      if (config?.live_version == null) throw new DemoError('Publish that workspace’s agent first (Agent → Publish)', 400);
+    }
+  }
   const { data, error } = await db()
     .from('va_demo_settings')
     .update({ ...update, updated_at: new Date().toISOString() })
@@ -335,6 +422,28 @@ export async function startDemoCall(input: {
   }
 
   try {
+    // A scenario mapped to a real workspace calls that workspace's published agent: its own
+    // prompt, apartments and calendar (bookings land on its Bookings tab)
+    const live = await liveScenarioAgent(settings, input.scenario);
+    if (live) {
+      const token = await startWebCall({
+        workspace: await getPlatformWorkspace(),
+        source: 'demo',
+        userId: input.userId,
+        pageUrl: input.pageUrl,
+        agentId: live.config.retell_agent_id,
+        agentVersion: live.config.live_version!,
+        maxDurationMs: reservation.allotted_seconds * 1000,
+        language: input.language === 'fil' ? FILIPINO : undefined,
+      });
+      await db()
+        .from('va_demo_sessions')
+        .update({ retell_call_id: token.call_id, status: 'started' })
+        .eq('website_id', WEBSITE_ID)
+        .eq('id', reservation.session_id);
+      return { token, allottedSeconds: reservation.allotted_seconds };
+    }
+
     const scenario = input.scenario === 'support' ? null : SCENARIOS[input.scenario];
     // Demo calls are the platform's own cost, so they're logged under the platform workspace
     const token = await startWebCall({
