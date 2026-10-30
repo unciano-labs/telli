@@ -1,9 +1,11 @@
 'use server';
 
+import { headers } from 'next/headers';
 import { redirect } from 'next/navigation';
 import { createAdminClient, createClient } from '@/lib/supabase/server';
 import { hasWebsiteAccess } from '@/lib/auth';
 import { WEBSITE_ID } from '@/lib/env';
+import { publicAppUrl } from '@/lib/public-url';
 
 export type AuthFormState = { error?: string; message?: string; email?: string; fullName?: string };
 
@@ -16,6 +18,19 @@ const DISPOSABLE_DOMAINS = new Set([
   'dispostable.com', 'maildrop.cc', 'throwawaymail.com', 'fakeinbox.com', 'mintemail.com',
   'emailondeck.com', 'mohmal.com', 'tempinbox.com', 'mailnesia.com', 'spamgourmet.com', 'moakt.com',
 ]);
+
+/**
+ * Where confirmation emails link back to. The Supabase project is shared with other websites,
+ * so its Site URL belongs to them; Voice Agent passes its own address (which must be listed
+ * under Redirect URLs in Supabase Auth).
+ */
+async function appUrl() {
+  const fixed = publicAppUrl();
+  if (fixed) return fixed;
+  const h = await headers();
+  const host = h.get('x-forwarded-host') ?? h.get('host');
+  return host ? `${h.get('x-forwarded-proto') ?? 'http'}://${host}` : null;
+}
 
 function safeNext(next: FormDataEntryValue | null): string | null {
   const value = typeof next === 'string' ? next : '';
@@ -73,10 +88,15 @@ export async function signupAction(_prev: AuthFormState, formData: FormData): Pr
   let userId: string;
   let hasSession: boolean;
 
+  const base = await appUrl();
   const { data: signUp, error: signUpErr } = await supabase.auth.signUp({
     email,
     password,
-    options: { data: { full_name: fullName } },
+    options: {
+      data: { full_name: fullName },
+      // Supabase confirms the email first, then sends them here to log in
+      ...(base && { emailRedirectTo: `${base}/login?notice=confirmed` }),
+    },
   });
 
   const alreadyExists =
